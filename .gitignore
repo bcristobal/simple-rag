@@ -9,9 +9,12 @@ wheels/
 # Virtual environments
 .venv
 
+# UV
+uv.lock
+
 # Pytest cache
 .pytest_cache/
 
-Enviroment variables
+# Enviroment variables
 .env
 .env.*

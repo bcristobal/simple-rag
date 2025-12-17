@@ -6,6 +6,9 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "chromadb>=1.3.5",
+    "langchain-core>=1.1.1",
+    "langchain-google-genai>=3.2.0",
+    "langchain-text-splitters>=1.0.0",
     "llama-cloud-services>=0.6.81",
     "llama-parse>=0.6.81",
     "ollama>=0.6.1",
