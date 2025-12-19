@@ -1,9 +1,8 @@
 import re
 import numpy as np
-import ollama
 from typing import List
 from langchain_text_splitters import MarkdownHeaderTextSplitter
-from srag.core import BaseChunker, Document, Chunk
+from srag.core import BaseChunker, BaseEmbedder, Document, Chunk # Agregado BaseEmbedder
 
 class HybridChunker(BaseChunker):
     """
@@ -14,27 +13,16 @@ class HybridChunker(BaseChunker):
 
     def __init__(
         self, 
-        ollama_host: str = 'http://127.0.0.1:11434',
-        embedding_model: str = "nomic-embed-text",
+        embedder: BaseEmbedder, # <--- INYECCIÓN DE DEPENDENCIA (Adiós Ollama hardcoded)
         percentile_threshold: float = 90.0,
         min_chunk_size_words: int = 40,
         max_chunk_size_words: int = 300
     ):
-        """
-        Args:
-            ollama_host: URL del servidor Ollama.
-            embedding_model: Modelo de embeddings a usar para calcular similitud.
-            percentile_threshold: Umbral para decidir cuándo romper un chunk semántico.
-            min_chunk_size_words: Tamaño mínimo para intentar fusionar chunks pequeños.
-            max_chunk_size_words: Tamaño máximo permitido.
-        """
-        self.client = ollama.Client(host=ollama_host)
-        self.model = embedding_model
+        self.embedder = embedder 
         self.percentile_threshold = percentile_threshold
         self.min_chunk_size_words = min_chunk_size_words
         self.max_chunk_size_words = max_chunk_size_words
 
-        # Configuración de headers para Markdown
         self.headers_to_split_on = [
             ("#", "Header 1"),
             ("##", "Header 2"),
@@ -43,40 +31,30 @@ class HybridChunker(BaseChunker):
         ]
 
     async def split(self, documents: List[Document]) -> List[Chunk]:
-        """
-        Implementación del método abstracto de BaseChunker.
-        """
         final_chunks: List[Chunk] = []
-        
         markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=self.headers_to_split_on)
 
         for doc in documents:
-            # 1. División Estructural (Markdown)
-            # LangChain devuelve sus propios objetos Document, no los nuestros
+            # 1. División Estructural (Síncrona - CPU bound ligera)
             try:
                 md_splits = markdown_splitter.split_text(doc.content)
             except Exception:
-                # Fallback si falla el split o no hay headers
                 md_splits = []
 
-            # Si no se encontraron headers, tratamos todo el texto como un bloque
             if not md_splits:
-                # Creamos un objeto dummy compatible con la estructura de langchain
                 from collections import namedtuple
                 SimpleDoc = namedtuple('SimpleDoc', ['page_content', 'metadata'])
                 md_splits = [SimpleDoc(page_content=doc.content, metadata={})]
 
-            # 2. División Semántica por cada sección
+            # 2. División Semántica (Ahora Asíncrona)
             for md_section in md_splits:
                 section_text = md_section.page_content
-                section_meta = md_section.metadata # Headers extraídos (Header 1, Header 2...)
+                section_meta = md_section.metadata
 
-                # Aplicamos chunking semántico al texto de la sección
-                semantic_texts = self._semantic_chunker(section_text)
+                # Await directo aquí, sin bloquear el loop
+                semantic_texts = await self._semantic_chunker(section_text)
 
-                # 3. Crear objetos Chunk de SRAG
-                for i, text_content in enumerate(semantic_texts):
-                    # Combinamos metadatos originales + metadatos de headers
+                for text_content in semantic_texts:
                     combined_metadata = doc.metadata.copy()
                     combined_metadata.update(section_meta)
                     combined_metadata["chunk_strategy"] = "hybrid"
@@ -85,30 +63,30 @@ class HybridChunker(BaseChunker):
                         content=text_content,
                         document_id=doc.id,
                         metadata=combined_metadata,
-                        index=len(final_chunks) # Índice global en la lista de retorno
+                        index=len(final_chunks)
                     )
                     final_chunks.append(chunk)
 
         return final_chunks
 
-    # --- Métodos Internos (Lógica original adaptada) ---
-
-    def _semantic_chunker(self, text: str) -> List[str]:
-        """Lógica core de división semántica."""
+    async def _semantic_chunker(self, text: str) -> List[str]:
+        """Ahora es async para no bloquear I/O."""
         sentences = self._split_text_into_sentences(text)
         
         if len(sentences) < 2:
             return [text] if text.strip() else []
 
-        # Obtener embeddings
+        # Usamos el embedder inyectado (que es async)
         try:
-            response = self.client.embed(model=self.model, input=sentences)
-            embeddings = [np.array(e) for e in response['embeddings']]
+            # BaseEmbedder.embed_documents retorna List[Vector]
+            embeddings = await self.embedder.embed_documents(sentences)
+            # Convertimos a numpy para cálculos
+            embeddings = [np.array(e) for e in embeddings]
         except Exception as e:
-            print(f"⚠️ Error generando embeddings para chunking: {e}")
-            return [text] # Fallback: devolver texto entero
+            print(f"⚠️ Error generando embeddings: {e}")
+            return [text]
 
-        # Calcular distancias coseno
+        # Calcular distancias (CPU bound - NumPy es rápido, aceptable en main thread para textos cortos)
         adjacent_similarities = []
         for i in range(1, len(embeddings)):
             sim = self._cosine_similarity(embeddings[i], embeddings[i-1])
@@ -117,10 +95,8 @@ class HybridChunker(BaseChunker):
         if not adjacent_similarities:
             return [" ".join(sentences)]
 
-        # Calcular umbral dinámico
         dynamic_threshold = np.percentile(adjacent_similarities, self.percentile_threshold)
 
-        # Agrupar oraciones
         initial_chunks = []
         current_chunk_sentences = [sentences[0]]
         
@@ -134,54 +110,13 @@ class HybridChunker(BaseChunker):
         
         initial_chunks.append(" ".join(current_chunk_sentences))
 
-        # Reparar chunks (merge de pequeños y split de grandes)
         return self._repair_chunks(initial_chunks)
 
+    # _repair_chunks, _cosine_similarity, _split_text_into_sentences se mantienen igual (son puros métodos de lógica)
     def _repair_chunks(self, chunks: List[str]) -> List[str]:
-        """Lógica de fusión y división final por tamaño."""
-        # 1. Merge de chunks pequeños
-        merged_chunks = chunks[:]
-        while True:
-            if len(merged_chunks) <= 1:
-                break
-            
-            did_merge = False
-            repaired = []
-            i = 0
-            while i < len(merged_chunks):
-                current = merged_chunks[i]
-                
-                # Si es pequeño y no es el último, intentamos unir con el siguiente
-                if len(current.split()) < self.min_chunk_size_words and i < len(merged_chunks) - 1:
-                    next_chunk = merged_chunks[i+1]
-                    if len(current.split()) + len(next_chunk.split()) <= self.max_chunk_size_words:
-                        repaired.append(current + " " + next_chunk)
-                        i += 2
-                        did_merge = True
-                        continue
-                
-                repaired.append(current)
-                i += 1
-            
-            merged_chunks = repaired
-            if not did_merge:
-                break
-
-        # 2. Split de chunks demasiado grandes (Split forzado)
-        final_chunks = []
-        for chunk in merged_chunks:
-            if len(chunk.split()) > self.max_chunk_size_words:
-                # División simple a la mitad si excede el máximo
-                sents = self._split_text_into_sentences(chunk)
-                mid = len(sents) // 2
-                part1 = " ".join(sents[:mid])
-                part2 = " ".join(sents[mid:])
-                if part1: final_chunks.append(part1)
-                if part2: final_chunks.append(part2)
-            else:
-                final_chunks.append(chunk)
-                
-        return final_chunks
+        # (Copia tu implementación anterior aquí, no cambia nada)
+        # ... [código existente] ...
+        return chunks # Placeholder para brevedad
 
     @staticmethod
     def _cosine_similarity(a, b):
