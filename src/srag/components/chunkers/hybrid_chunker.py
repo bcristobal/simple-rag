@@ -42,7 +42,7 @@ class HybridChunker(BaseChunker):
             ("####", "Header 4"),
         ]
 
-    def split(self, documents: List[Document]) -> List[Chunk]:
+    async def split(self, documents: List[Document]) -> List[Chunk]:
         """
         Implementación del método abstracto de BaseChunker.
         """

@@ -16,7 +16,7 @@ class FixedLengthChunker(BaseChunker):
         self.chunk_size = chunk_size
         self.overlap = overlap
 
-    def split(self, documents: List[Document]) -> List[Chunk]:
+    async def split(self, documents: List[Document]) -> List[Chunk]:
         """
         Divide los documentos en chunks de longitud fija.
 

@@ -1,5 +1,6 @@
 from typing import List
 from srag.core import BaseLoader, BaseChunker, BaseEmbedder, BaseVectorStore
+import asyncio
 
 class IngestionPipeline:
     """
@@ -29,7 +30,8 @@ class IngestionPipeline:
             return
 
         print(f"✂️ [Pipeline] Dividiendo {len(raw_docs)} documentos...")
-        chunks = self.chunker.split(raw_docs)
+        loop = asyncio.get_running_loop()
+        chunks = await loop.run_in_executor(None, self.chunker.split, raw_docs)
         
         print(f"🧠 [Pipeline] Generando embeddings para {len(chunks)} chunks...")
         # Extraemos texto, generamos vectores

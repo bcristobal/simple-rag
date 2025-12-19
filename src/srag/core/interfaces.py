@@ -25,7 +25,7 @@ class BaseChunker(ABC):
     """
     
     @abstractmethod
-    def split(self, documents: List[Document]) -> List[Chunk]:
+    async def split(self, documents: List[Document]) -> List[Chunk]:
         """Recibe documentos completos y retorna fragmentos."""
         pass
 
