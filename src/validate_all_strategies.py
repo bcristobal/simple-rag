@@ -8,7 +8,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Importamos TODOS los componentes necesarios
 from srag.components.loaders import LlamaParseLoader
-from srag.components.chunkers.fixed_length_chunker import FixedLengthChunker
+from srag.components.chunkers import FixedLengthChunker, HybridChunker
 from srag.components.embeddings import OllamaEmbeddings
 from srag.components.vectorstores import ChromaVectorStore
 from srag.components.llms import OllamaLLM, GeminiLLM
@@ -37,7 +37,8 @@ async def setup_knowledge_base():
         sys.exit(1)
 
     loader = LlamaParseLoader([DOC_FILE], save_output=True)
-    chunker = FixedLengthChunker(chunk_size=500, overlap=50)
+    # chunker = FixedLengthChunker(chunk_size=500, overlap=50)
+    chunker = HybridChunker(embedder=OllamaEmbeddings(model=EMBEDDING_MODEL, base_url=BASE_URL))
     embedder = OllamaEmbeddings(model=EMBEDDING_MODEL, base_url=BASE_URL)
     vectorstore = ChromaVectorStore(collection_name=COLLECTION_NAME)
     llm = OllamaLLM(model_name=LLM_MODEL, base_url=BASE_URL)
