@@ -21,7 +21,7 @@ from srag.strategies import SimpleRAG, HybridRAG, AdaptiveRAG, HydeRAG, ModularR
 DOC_FILE = "BOE-A-1978-31229-consolidado.pdf" # Asegúrate de tener este archivo (o cualquier PDF)
 COLLECTION_NAME = "benchmark_strategies"
 EMBEDDING_MODEL = "nomic-embed-text"
-LLM_MODEL = "llama3.2"
+LLM_MODEL = "phi4-mini:3.8b" # "llama3.2"
 BASE_URL = "http://172.23.224.1:11434"
 
 async def setup_knowledge_base():
@@ -40,13 +40,13 @@ async def setup_knowledge_base():
     chunker = FixedLengthChunker(chunk_size=500, overlap=50)
     embedder = OllamaEmbeddings(model=EMBEDDING_MODEL, base_url=BASE_URL)
     vectorstore = ChromaVectorStore(collection_name=COLLECTION_NAME)
-    # llm = OllamaLLM(model_name=LLM_MODEL, base_url=BASE_URL)
-    llm =   GeminiLLM(api_key=os.getenv("GOOGLE_API_KEY"))
+    llm = OllamaLLM(model_name=LLM_MODEL, base_url=BASE_URL)
+    # llm =   GeminiLLM(api_key=os.getenv("GOOGLE_API_KEY"))
 
     # 2. Ingesta
     print(f"   📥 Cargando {DOC_FILE}...")
     docs = await loader.load()
-    chunks = chunker.split(docs)
+    chunks = await chunker.split(docs)
     
     print(f"   🧠 Generando embeddings para {len(chunks)} chunks...")
     vecs = await embedder.embed_documents([c.content for c in chunks])
