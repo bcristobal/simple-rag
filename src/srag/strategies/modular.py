@@ -65,21 +65,26 @@ class ModularRAG(HybridRAG):
         return fake_doc
 
     async def retrieve(self, query: str, k: int = 4, **kwargs) -> List[Chunk]:
-        search_query = query
+        vector_search_text = query
 
-        # 1. Módulo HyDE (Query Transformation)
+        # 1. Módulo HyDE: Transformamos SOLO la query vectorial
         if self.use_hyde:
             fake_doc = await self._generate_hyde_doc(query)
-            search_query = fake_doc  # Buscamos usando la alucinación, no la pregunta
+            vector_search_text = fake_doc  # La alucinación
+            print("   👻 HyDE: Usando documento hipotético para búsqueda vectorial.")
         
-        # 2. Módulo de Recuperación (Hybrid o Simple)
+        # 2. Módulo Híbrido
         if self.use_hybrid:
-            # Usamos la lógica de la clase padre (HybridRAG)
-            return await super().retrieve(search_query, k=k)
+            # MAGIA: Pasamos la alucinación para el vector, 
+            # pero HybridRAG usará 'query' (original) para las palabras clave.
+            return await super().retrieve(
+                query=query,          # Original para Keywords
+                vector_query=vector_search_text, # Alucinación para Vectores
+                k=k
+            )
         else:
-            # Fallback a búsqueda vectorial simple
-            print(f"🔍 [Modular] Búsqueda Vectorial Simple: '{search_query[:50]}...'")
-            q_vec = await self.embedder.embed_query(search_query)
+            # Fallback simple
+            q_vec = await self.embedder.embed_query(vector_search_text)
             return await self.vector_store.search(q_vec, k=k)
 
     async def stream(self, query: str, k: int = 4, **kwargs) -> AsyncGenerator[str, None]:

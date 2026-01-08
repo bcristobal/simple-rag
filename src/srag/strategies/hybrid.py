@@ -1,117 +1,150 @@
-from typing import List, AsyncGenerator, Dict, Set
-from collections import defaultdict, Counter
-import math
+from typing import List, AsyncGenerator, Dict, Set, Optional
+from collections import defaultdict
 import re
+import unicodedata
 
 from .base import BaseRAGStrategy
 from srag.core import Chunk
 
 class HybridRAG(BaseRAGStrategy):
     """
-    Estrategia RAG Híbrida Funcional.
+    Estrategia RAG Híbrida Mejorada.
     
     Combina:
-    1. Búsqueda Vectorial (Dense Retrieval) a través de ChromaDB.
-    2. Búsqueda por Palabras Clave (Sparse Retrieval) simulada en memoria sobre los candidatos.
-    3. Algoritmo de Fusión RRF (Reciprocal Rank Fusion) para el ranking final.
+    1. Búsqueda Vectorial (Dense Retrieval) con alto recall (pool grande).
+    2. Filtrado por Palabras Clave (Sparse Retrieval) con normalización lingüística.
+    3. Algoritmo de Fusión RRF (Reciprocal Rank Fusion).
     """
 
+    def _normalize_text(self, text: str) -> str:
+        """
+        Normaliza el texto para mejorar el matching en español:
+        1. Elimina acentos/diacríticos (NFD normalization).
+        2. Convierte a minúsculas.
+        """
+        if not text:
+            return ""
+        # Descompone caracteres (ej. 'ó' -> 'o' + '´') y elimina los de categoría 'Mn' (Non-spacing Mark)
+        return ''.join(
+            c for c in unicodedata.normalize('NFD', text) 
+            if unicodedata.category(c) != 'Mn'
+        ).lower()
+
     def _tokenize(self, text: str) -> Set[str]:
-        """Tokenizador simple: minúsculas y elimina puntuación."""
-        text = text.lower()
-        # Mantenemos solo letras y números
-        tokens = re.findall(r'\b\w+\b', text)
-        # Filtramos palabras muy cortas (stopwords simples)
+        """Tokenizador normalizado."""
+        # 1. Normalizamos (quitamos tildes, ñ -> n, etc. para búsqueda robusta)
+        clean_text = self._normalize_text(text)
+        
+        # 2. Extraemos palabras (alfanuméricas)
+        tokens = re.findall(r'\b\w+\b', clean_text)
+        
+        # 3. Filtramos stopwords muy cortas
         return {t for t in tokens if len(t) > 2}
 
     def _compute_keyword_score(self, query: str, chunk: Chunk) -> float:
-        """
-        Calcula un score simple basado en frecuencia de términos (TF).
-        Premia si el chunk contiene las palabras exactas de la query.
-        """
+        """Calcula score basado en coincidencia de tokens normalizados."""
         query_tokens = self._tokenize(query)
-        chunk_tokens = self._tokenize(chunk.content)
-        
         if not query_tokens:
             return 0.0
             
+        chunk_tokens = self._tokenize(chunk.content)
+        
         score = 0.0
+        matches = 0
         for token in query_tokens:
-            # Si la palabra clave está en el chunk, sumamos puntos
             if token in chunk_tokens:
                 score += 1.0
+                matches += 1
         
-        # Normalizamos por longitud para no favorecer solo textos largos excesivamente
+        # (Opcional) Boost si hay muchas coincidencias
         return score
 
     def _reciprocal_rank_fusion(self, vector_results: List[Chunk], keyword_results: List[Chunk], k=60) -> List[Chunk]:
-        """
-        Algoritmo estándar RRF.
-        Score = 1 / (constante + rango).
-        """
+        """Algoritmo estándar RRF."""
         fused_scores = defaultdict(float)
         doc_map = {}
 
-        # 1. Procesar ranking vectorial
+        # 1. Ranking Vectorial
         for rank, doc in enumerate(vector_results):
             doc_map[doc.id] = doc
             fused_scores[doc.id] += 1 / (k + rank + 1)
 
-        # 2. Procesar ranking por palabras clave
+        # 2. Ranking Keywords
         for rank, doc in enumerate(keyword_results):
             doc_map[doc.id] = doc
             fused_scores[doc.id] += 1 / (k + rank + 1)
 
-        # 3. Ordenar por score final descendente
+        # 3. Ordenar final
         sorted_ids = sorted(fused_scores.keys(), key=lambda x: fused_scores[x], reverse=True)
-        
         return [doc_map[doc_id] for doc_id in sorted_ids]
 
-    async def retrieve(self, query: str, k: int = 4, **kwargs) -> List[Chunk]:
+    async def retrieve(
+        self, 
+        query: str, 
+        k: int = 4, 
+        vector_query: Optional[str] = None, 
+        **kwargs
+    ) -> List[Chunk]:
         """
-        Recuperación Híbrida:
-        Trae un 'pool' grande de vectores y lo reordena por palabras clave.
-        """
-        # A. Recuperamos un 'pool' más grande de candidatos por vector (ej. k * 3)
-        # Esto aumenta la probabilidad de traer documentos que tengan buenas palabras clave
-        # aunque su vector no sea perfecto.
-        pool_size = k * 3
-        
-        query_vector = await self.embedder.embed_query(query)
-        candidates = await self.vector_store.search(query_vector, k=pool_size)
-        
-        # La lista 'candidates' ya es nuestro Ranking Vectorial (List A)
-        vector_ranked = candidates[:]
+        Recuperación Híbrida (Vector + Keywords).
 
-        # B. Generamos el Ranking por Palabras Clave (List B)
-        # Calculamos score léxico para cada candidato
+        Args:
+            query: La pregunta original del usuario (usada para keywords).
+            k: Número de resultados finales.
+            vector_query: (Opcional) Texto alternativo para la búsqueda vectorial 
+                          (ej. documento 'HyDE' alucinado). Si no se da, usa 'query'.
+        """
+        # A. Configuración de Búsqueda Vectorial
+        # Usamos vector_query si existe (para Modular/HyDE), sino la query original
+        search_text = vector_query if vector_query else query
+        
+        # Aumentamos el pool significativamente (k * 10) para emular un "Recall" alto
+        # y permitir que el re-ranking de palabras clave tenga material con el que trabajar.
+        pool_size = max(k * 10, 50) 
+        
+        # 1. Búsqueda Vectorial (Dense)
+        q_vec = await self.embedder.embed_query(search_text)
+        candidates = await self.vector_store.search(q_vec, k=pool_size)
+        
+        if not candidates:
+            return []
+
+        # Lista A: Ranking puramente vectorial (recortado a un tamaño razonable para RRF)
+        # Tomamos los top K*2 para la fusión vectorial
+        vector_ranked = candidates[:k*2]
+
+        # 2. Búsqueda por Palabras Clave (Sparse / Re-ranking)
+        # IMPORTANTE: Usamos siempre la 'query' original, nunca la alucinación HyDE
         scored_candidates = []
         for doc in candidates:
             score = self._compute_keyword_score(query, doc)
             scored_candidates.append((doc, score))
         
-        # Ordenamos por score de palabra clave
+        # Ordenamos por score de keywords
         scored_candidates.sort(key=lambda x: x[1], reverse=True)
-        keyword_ranked = [item[0] for item in scored_candidates]
+        
+        # Lista B: Los mejores candidatos según palabras clave
+        # Filtramos aquellos que tengan score > 0 para no introducir ruido
+        keyword_ranked = [item[0] for item in scored_candidates if item[1] > 0]
+        
+        # Si no hubo coincidencias de palabras clave, usamos el ranking vectorial como fallback
+        if not keyword_ranked:
+            keyword_ranked = vector_ranked
 
-        # C. Fusionamos con RRF
+        # 3. Fusión RRF
         final_results = self._reciprocal_rank_fusion(vector_ranked, keyword_ranked)
 
-        # Devolvemos solo los top K solicitados
         return final_results[:k]
 
     async def stream(self, query: str, k: int = 4, **kwargs) -> AsyncGenerator[str, None]:
-        # 1. Retrieve Híbrido
-        chunks = await self.retrieve(query, k=k)
+        chunks = await self.retrieve(query, k=k, **kwargs)
         
         if not chunks:
             yield "No se encontró información relevante."
             return
 
-        # 2. Construir contexto
         context_text = self._build_context(chunks)
-
-        # 3. Prompt específico para Hybrid
+        
         prompt = f"""Actúa como un analista experto. Usa el siguiente contexto (obtenido mediante búsqueda híbrida) para responder.
 
 CONTEXTO:
@@ -122,6 +155,5 @@ PREGUNTA DEL USUARIO:
 
 RESPUESTA:"""
 
-        # 4. Generar
         async for token in self.llm.stream(prompt):
             yield token
